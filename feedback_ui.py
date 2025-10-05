@@ -9,10 +9,10 @@ from typing import Optional, TypedDict
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QLineEdit, QPushButton, QCheckBox, QTextEdit, QGroupBox, QTextBrowser, QSplitter
+    QLabel, QLineEdit, QPushButton, QCheckBox, QTextEdit, QGroupBox, QTextBrowser, QSplitter, QComboBox, QFileDialog
 )
 from PySide6.QtCore import Qt, Signal, QObject, QTimer, QSettings
-from PySide6.QtGui import QTextCursor, QIcon, QKeyEvent, QFont, QFontDatabase, QPalette, QColor
+from PySide6.QtGui import QTextCursor, QIcon, QKeyEvent, QFont, QFontDatabase, QPalette, QColor, QShortcut, QKeySequence
 
 class FeedbackResult(TypedDict):
     command_logs: str
@@ -21,10 +21,60 @@ class FeedbackResult(TypedDict):
 class FeedbackConfig(TypedDict):
     run_command: str
     execute_automatically: bool = False
+    command_templates: list = []  # List of saved command templates
 
-def markdown_to_html(markdown_text: str) -> str:
+def highlight_log_line(line: str) -> str:
+    """Apply syntax highlighting to a log line"""
+    import re
+
+    # Escape HTML special characters
+    line = line.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+    # Error patterns (red)
+    if re.search(r'\b(error|ERROR|Error|failed|FAILED|Failed|exception|Exception|EXCEPTION)\b', line):
+        return f'<span style="color: #e74c3c; font-weight: bold;">{line}</span>'
+
+    # Warning patterns (yellow/orange)
+    if re.search(r'\b(warning|WARNING|Warning|warn|WARN|Warn)\b', line):
+        return f'<span style="color: #f39c12; font-weight: bold;">{line}</span>'
+
+    # Success patterns (green)
+    if re.search(r'\b(success|SUCCESS|Success|passed|PASSED|Passed|completed|COMPLETED|Completed|✓|✔)\b', line):
+        return f'<span style="color: #2ecc71; font-weight: bold;">{line}</span>'
+
+    # Info patterns (blue)
+    if re.search(r'\b(info|INFO|Info|note|NOTE|Note)\b', line):
+        return f'<span style="color: #3498db;">{line}</span>'
+
+    # File paths (cyan)
+    line = re.sub(r'([/\\][\w/\\.-]+\.\w+)', r'<span style="color: #1abc9c;">\1</span>', line)
+
+    # URLs (blue underline)
+    line = re.sub(r'(https?://[^\s]+)', r'<span style="color: #3498db; text-decoration: underline;">\1</span>', line)
+
+    # Numbers (purple)
+    line = re.sub(r'\b(\d+)\b', r'<span style="color: #9b59b6;">\1</span>', line)
+
+    # Timestamps (gray)
+    line = re.sub(r'(\d{2}:\d{2}:\d{2})', r'<span style="color: #95a5a6;">\1</span>', line)
+
+    return line
+
+def markdown_to_html(markdown_text: str, is_dark_theme: bool = True) -> str:
     """Convert markdown to HTML with proper formatting support"""
     import re
+
+    # Theme colors
+    if is_dark_theme:
+        text_color = "#ecf0f1"
+        code_bg = "#1e1e1e"
+        code_color = "#d4d4d4"
+        header_color = "#3498db"
+    else:
+        text_color = "#212529"
+        code_bg = "#f5f5f5"
+        code_color = "#c7254e"
+        header_color = "#0056b3"
 
     lines = markdown_text.split('\n')
     html_lines = []
@@ -38,7 +88,7 @@ def markdown_to_html(markdown_text: str) -> str:
             if in_code_block:
                 # End code block
                 code_content = '\n'.join(code_block_content)
-                html_lines.append(f'<pre style="background-color: #1e1e1e; padding: 8px; margin: 5px 0; border-radius: 3px; color: #d4d4d4; font-family: monospace; font-size: 10pt;"><code>{code_content}</code></pre>')
+                html_lines.append(f'<pre style="background-color: {code_bg}; padding: 8px; margin: 5px 0; border-radius: 3px; color: {code_color}; font-family: monospace; font-size: 10pt;"><code>{code_content}</code></pre>')
                 code_block_content = []
                 in_code_block = False
             else:
@@ -52,13 +102,13 @@ def markdown_to_html(markdown_text: str) -> str:
 
         # Headers
         if line.startswith('### '):
-            html_lines.append(f'<h3 style="color: #3498db; margin: 8px 0 4px 0; font-size: 13pt;">{line[4:]}</h3>')
+            html_lines.append(f'<h3 style="color: {header_color}; margin: 8px 0 4px 0; font-size: 13pt;">{line[4:]}</h3>')
             continue
         elif line.startswith('## '):
-            html_lines.append(f'<h2 style="color: #3498db; margin: 10px 0 5px 0; font-size: 14pt;">{line[3:]}</h2>')
+            html_lines.append(f'<h2 style="color: {header_color}; margin: 10px 0 5px 0; font-size: 14pt;">{line[3:]}</h2>')
             continue
         elif line.startswith('# '):
-            html_lines.append(f'<h1 style="color: #3498db; margin: 12px 0 6px 0; font-size: 16pt;">{line[2:]}</h1>')
+            html_lines.append(f'<h1 style="color: {header_color}; margin: 12px 0 6px 0; font-size: 16pt;">{line[2:]}</h1>')
             continue
 
         # Lists
@@ -69,7 +119,7 @@ def markdown_to_html(markdown_text: str) -> str:
             content = line.strip()[2:]
             # Process inline formatting
             content = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', content)
-            content = re.sub(r'`(.+?)`', r'<code style="background-color: #1e1e1e; padding: 1px 4px; border-radius: 2px; color: #d4d4d4; font-size: 10pt;">\1</code>', content)
+            content = re.sub(r'`(.+?)`', f'<code style="background-color: {code_bg}; padding: 1px 4px; border-radius: 2px; color: {code_color}; font-size: 10pt;">\\1</code>', content)
             html_lines.append(f'<li style="margin: 2px 0; font-size: 11pt;">{content}</li>')
             continue
         else:
@@ -90,7 +140,7 @@ def markdown_to_html(markdown_text: str) -> str:
         # Italic
         processed_line = re.sub(r'\*([^*]+?)\*', r'<i>\1</i>', processed_line)
         # Inline code
-        processed_line = re.sub(r'`(.+?)`', r'<code style="background-color: #1e1e1e; padding: 1px 4px; border-radius: 2px; color: #d4d4d4; font-size: 10pt;">\1</code>', processed_line)
+        processed_line = re.sub(r'`(.+?)`', f'<code style="background-color: {code_bg}; padding: 1px 4px; border-radius: 2px; color: {code_color}; font-size: 10pt;">\\1</code>', processed_line)
 
         html_lines.append(f'<span style="font-size: 11pt;">{processed_line}</span>')
 
@@ -100,7 +150,7 @@ def markdown_to_html(markdown_text: str) -> str:
 
     html_content = ''.join(html_lines)
 
-    return f'<div style="color: #ecf0f1; font-family: Arial, sans-serif; font-size: 11pt; line-height: 1.5;">{html_content}</div>'
+    return f'<div style="color: {text_color}; font-family: Arial, sans-serif; font-size: 11pt; line-height: 1.5;">{html_content}</div>'
 
 def set_dark_title_bar(widget: QWidget, dark_title_bar: bool) -> None:
     # Ensure we're on Windows
@@ -160,6 +210,23 @@ def get_dark_mode_palette(app: QApplication):
     darkPalette.setColor(QPalette.Disabled, QPalette.HighlightedText, QColor(127, 127, 127))
     darkPalette.setColor(QPalette.PlaceholderText, QColor(127, 127, 127))
     return darkPalette
+
+def get_light_mode_palette(app: QApplication):
+    lightPalette = QPalette()
+    lightPalette.setColor(QPalette.Window, QColor(240, 240, 240))
+    lightPalette.setColor(QPalette.WindowText, Qt.black)
+    lightPalette.setColor(QPalette.Base, QColor(255, 255, 255))
+    lightPalette.setColor(QPalette.AlternateBase, QColor(245, 245, 245))
+    lightPalette.setColor(QPalette.ToolTipBase, Qt.white)
+    lightPalette.setColor(QPalette.ToolTipText, Qt.black)
+    lightPalette.setColor(QPalette.Text, Qt.black)
+    lightPalette.setColor(QPalette.Button, QColor(240, 240, 240))
+    lightPalette.setColor(QPalette.ButtonText, Qt.black)
+    lightPalette.setColor(QPalette.BrightText, Qt.red)
+    lightPalette.setColor(QPalette.Link, QColor(0, 0, 255))
+    lightPalette.setColor(QPalette.Highlight, QColor(42, 130, 218))
+    lightPalette.setColor(QPalette.HighlightedText, Qt.white)
+    return lightPalette
 
 def kill_tree(process: subprocess.Popen):
     killed: list[psutil.Process] = []
@@ -291,7 +358,13 @@ class FeedbackUI(QMainWindow):
         self.project_directory = project_directory
         self.prompt = prompt
         self.config_path = os.path.join(project_directory, ".user-feedback.json")
+        self.history_path = os.path.join(project_directory, ".user-feedback-history.json")
         self.config = self._load_config()
+        self.history = self._load_history()
+
+        # Load theme preference
+        self.settings = QSettings("UserFeedback", "MainWindow")
+        self.is_dark_theme = self.settings.value("dark_theme", True, type=bool)
 
         self.process: Optional[subprocess.Popen] = None
         self.log_buffer = []
@@ -341,6 +414,37 @@ class FeedbackUI(QMainWindow):
         with open(self.config_path, "w") as f:
             json.dump(self.config, f, indent=2)
 
+    def _load_history(self) -> list:
+        """Load feedback history from file"""
+        try:
+            if os.path.exists(self.history_path):
+                with open(self.history_path, "r") as f:
+                    return json.load(f)
+        except Exception:
+            pass
+        return []
+
+    def _save_history(self):
+        """Save feedback history to file (keep last 20 entries)"""
+        try:
+            # Keep only last 20 entries
+            history_to_save = self.history[-20:] if len(self.history) > 20 else self.history
+            with open(self.history_path, "w") as f:
+                json.dump(history_to_save, f, indent=2)
+        except Exception as e:
+            print(f"Failed to save history: {e}")
+
+    def _add_to_history(self, feedback: str):
+        """Add feedback to history"""
+        import datetime
+        entry = {
+            "timestamp": datetime.datetime.now().isoformat(),
+            "feedback": feedback,
+            "prompt": self.prompt[:100]  # Store first 100 chars of prompt
+        }
+        self.history.append(entry)
+        self._save_history()
+
     def _format_windows_path(self, path: str) -> str:
         if sys.platform == "win32":
             # Convert forward slashes to backslashes
@@ -364,13 +468,31 @@ class FeedbackUI(QMainWindow):
         working_dir_label = QLabel(f"Working directory: {formatted_path}")
         command_layout.addWidget(working_dir_label)
 
+        # Command templates row
+        templates_layout = QHBoxLayout()
+        templates_label = QLabel("Templates:")
+        self.templates_combo = QComboBox()
+        self.templates_combo.addItem("-- Select template --")
+        self._populate_templates_combo()
+        self.templates_combo.currentIndexChanged.connect(self._on_template_selected)
+
+        save_template_button = QPushButton("💾")
+        save_template_button.setMaximumWidth(35)
+        save_template_button.setToolTip("Save current command as template")
+        save_template_button.clicked.connect(self._save_template)
+
+        templates_layout.addWidget(templates_label)
+        templates_layout.addWidget(self.templates_combo, stretch=1)
+        templates_layout.addWidget(save_template_button)
+        command_layout.addLayout(templates_layout)
+
         # Command input row
         command_input_layout = QHBoxLayout()
         self.command_entry = QLineEdit()
         self.command_entry.setText(self.config["run_command"])
         self.command_entry.returnPressed.connect(self._run_command)
         self.command_entry.textChanged.connect(self._update_config)
-        self.run_button = QPushButton("&Run")
+        self.run_button = QPushButton("&Run (Ctrl+R / F5)")
         self.run_button.clicked.connect(self._run_command)
 
         command_input_layout.addWidget(self.command_entry)
@@ -383,41 +505,90 @@ class FeedbackUI(QMainWindow):
         self.auto_check.setChecked(self.config.get("execute_automatically", False))
         self.auto_check.stateChanged.connect(self._update_config)
 
-        save_button = QPushButton("&Save Configuration")
+        # Theme toggle button
+        self.theme_button = QPushButton("🌙 Dark (Ctrl+T)" if self.is_dark_theme else "☀️ Light (Ctrl+T)")
+        self.theme_button.setMaximumWidth(130)
+        self.theme_button.clicked.connect(self._toggle_theme)
+
+        save_button = QPushButton("&Save Config (Ctrl+S)")
         save_button.clicked.connect(self._save_config)
 
         auto_layout.addWidget(self.auto_check)
         auto_layout.addStretch()
+        auto_layout.addWidget(self.theme_button)
         auto_layout.addWidget(save_button)
         command_layout.addLayout(auto_layout)
 
         layout.addWidget(command_group)
 
         # Create a splitter for resizable sections
-        splitter = QSplitter(Qt.Vertical)
+        self.splitter = QSplitter(Qt.Vertical)
 
         # Console section (resizable)
         console_group = QGroupBox("Console")
         console_layout = QVBoxLayout(console_group)
         console_group.setMinimumHeight(80)
 
-        # Log text area
+        # Search box
+        search_layout = QHBoxLayout()
+        search_label = QLabel("🔍")
+        self.search_entry = QLineEdit()
+        self.search_entry.setPlaceholderText("Search in logs...")
+        self.search_entry.textChanged.connect(self._search_logs)
+        self.search_entry.returnPressed.connect(self._search_next)
+
+        search_prev_button = QPushButton("↑")
+        search_prev_button.setMaximumWidth(30)
+        search_prev_button.clicked.connect(self._search_prev)
+
+        search_next_button = QPushButton("↓")
+        search_next_button.setMaximumWidth(30)
+        search_next_button.clicked.connect(self._search_next)
+
+        self.search_result_label = QLabel("")
+        self.search_result_label.setStyleSheet("color: #95a5a6; font-size: 9pt;")
+
+        search_layout.addWidget(search_label)
+        search_layout.addWidget(self.search_entry, stretch=1)
+        search_layout.addWidget(search_prev_button)
+        search_layout.addWidget(search_next_button)
+        search_layout.addWidget(self.search_result_label)
+        console_layout.addLayout(search_layout)
+
+        # Log text area with syntax highlighting
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
+        self.log_text.setAcceptRichText(True)
         font = QFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
         font.setPointSize(9)
         self.log_text.setFont(font)
         console_layout.addWidget(self.log_text)
 
-        # Clear button
+        # Console buttons
         button_layout = QHBoxLayout()
-        self.clear_button = QPushButton("&Clear")
-        self.clear_button.clicked.connect(self.clear_logs)
+
+        # Copy button
+        copy_button = QPushButton("📋 Copy")
+        copy_button.setMaximumWidth(80)
+        copy_button.clicked.connect(self._copy_logs)
+        button_layout.addWidget(copy_button)
+
+        # Export button
+        export_button = QPushButton("💾 Export")
+        export_button.setMaximumWidth(80)
+        export_button.clicked.connect(self._export_logs)
+        button_layout.addWidget(export_button)
+
         button_layout.addStretch()
+
+        # Clear button
+        self.clear_button = QPushButton("&Clear (Ctrl+L)")
+        self.clear_button.clicked.connect(self.clear_logs)
         button_layout.addWidget(self.clear_button)
+
         console_layout.addLayout(button_layout)
 
-        splitter.addWidget(console_group)
+        self.splitter.addWidget(console_group)
 
         # Feedback Content section (MAIN FOCUS - displays MCP prompt/summary with Markdown)
         feedback_content_group = QGroupBox("Feedback Content")
@@ -427,27 +598,26 @@ class FeedbackUI(QMainWindow):
         self.prompt_display = QTextBrowser()
         self.prompt_display.setReadOnly(True)
         self.prompt_display.setOpenExternalLinks(True)
-        self.prompt_display.setHtml(markdown_to_html(self.prompt))
-        self.prompt_display.setStyleSheet("""
-            QTextBrowser {
-                background-color: #2c3e50;
-                color: #ecf0f1;
-                border: 1px solid #34495e;
-                border-radius: 5px;
-                padding: 10px;
-                font-family: Arial, sans-serif;
-                font-size: 12pt;
-                line-height: 1.5;
-            }
-        """)
+        # Theme will be applied in _apply_theme()
         feedback_content_layout.addWidget(self.prompt_display)
 
-        splitter.addWidget(feedback_content_group)
+        self.splitter.addWidget(feedback_content_group)
 
         # User Feedback Input section (resizable)
         user_feedback_group = QGroupBox("Your Feedback")
         user_feedback_layout = QVBoxLayout(user_feedback_group)
         user_feedback_group.setMinimumHeight(80)
+
+        # History dropdown
+        history_layout = QHBoxLayout()
+        history_label = QLabel("Recent:")
+        self.history_combo = QComboBox()
+        self.history_combo.addItem("-- Select from history --")
+        self._populate_history_combo()
+        self.history_combo.currentIndexChanged.connect(self._on_history_selected)
+        history_layout.addWidget(history_label)
+        history_layout.addWidget(self.history_combo, stretch=1)
+        user_feedback_layout.addLayout(history_layout)
 
         self.feedback_text = FeedbackTextEdit()
         self.feedback_text.setMinimumHeight(40)
@@ -458,22 +628,164 @@ class FeedbackUI(QMainWindow):
         user_feedback_layout.addWidget(self.feedback_text)
         user_feedback_layout.addWidget(submit_button)
 
-        splitter.addWidget(user_feedback_group)
+        self.splitter.addWidget(user_feedback_group)
 
-        # Set initial sizes: Console=1, Feedback Content=4, User Feedback=1
-        splitter.setSizes([100, 400, 100])
+        # Restore splitter sizes or set defaults
+        saved_sizes = self.settings.value("splitter_sizes")
+        if saved_sizes:
+            self.splitter.setSizes(saved_sizes)
+        else:
+            # Default sizes: Console=2, Feedback Content=4, User Feedback=2
+            self.splitter.setSizes([200, 400, 200])
 
-        layout.addWidget(splitter)
+        layout.addWidget(self.splitter)
+
+        # Apply initial theme
+        self._apply_theme()
+
+        # Setup keyboard shortcuts
+        self._setup_shortcuts()
+
+    def _setup_shortcuts(self):
+        """Setup keyboard shortcuts"""
+        # Ctrl+R: Run command
+        run_shortcut = QShortcut(QKeySequence("Ctrl+R"), self)
+        run_shortcut.activated.connect(self._run_command)
+
+        # Ctrl+L: Clear logs
+        clear_shortcut = QShortcut(QKeySequence("Ctrl+L"), self)
+        clear_shortcut.activated.connect(self.clear_logs)
+
+        # Ctrl+S: Save configuration
+        save_shortcut = QShortcut(QKeySequence("Ctrl+S"), self)
+        save_shortcut.activated.connect(self._save_config)
+
+        # Ctrl+T: Toggle theme
+        theme_shortcut = QShortcut(QKeySequence("Ctrl+T"), self)
+        theme_shortcut.activated.connect(self._toggle_theme)
+
+        # Ctrl+Enter: Submit feedback (already handled in FeedbackTextEdit)
+        # F5: Run command (alternative)
+        f5_shortcut = QShortcut(QKeySequence("F5"), self)
+        f5_shortcut.activated.connect(self._run_command)
+
+    def _toggle_theme(self):
+        """Toggle between dark and light theme"""
+        self.is_dark_theme = not self.is_dark_theme
+        self.settings.setValue("dark_theme", self.is_dark_theme)
+        self.theme_button.setText("🌙 Dark" if self.is_dark_theme else "☀️ Light")
+        self._apply_theme()
+
+    def _apply_theme(self):
+        """Apply the current theme to the application"""
+        app = QApplication.instance()
+        if self.is_dark_theme:
+            app.setPalette(get_dark_mode_palette(app))
+            # Dark theme for prompt display
+            self.prompt_display.setStyleSheet("""
+                QTextBrowser {
+                    background-color: #2c3e50;
+                    color: #ecf0f1;
+                    border: 1px solid #34495e;
+                    border-radius: 5px;
+                    padding: 10px;
+                }
+            """)
+        else:
+            app.setPalette(get_light_mode_palette(app))
+            # Light theme for prompt display
+            self.prompt_display.setStyleSheet("""
+                QTextBrowser {
+                    background-color: #f8f9fa;
+                    color: #212529;
+                    border: 1px solid #dee2e6;
+                    border-radius: 5px;
+                    padding: 10px;
+                }
+            """)
+        # Re-render markdown with appropriate colors
+        self.prompt_display.setHtml(markdown_to_html(self.prompt, self.is_dark_theme))
 
     def _update_config(self):
         self.config = {
             "run_command": self.command_entry.text(),
-            "execute_automatically": self.auto_check.isChecked()
+            "execute_automatically": self.auto_check.isChecked(),
+            "command_templates": self.config.get("command_templates", [])
         }
+
+    def _populate_templates_combo(self):
+        """Populate templates combobox"""
+        self.templates_combo.clear()
+        self.templates_combo.addItem("-- Select template --")
+
+        templates = self.config.get("command_templates", [])
+        for template in templates:
+            self.templates_combo.addItem(template)
+
+    def _on_template_selected(self, index: int):
+        """Handle template selection"""
+        if index > 0:  # Skip placeholder
+            template = self.templates_combo.currentText()
+            self.command_entry.setText(template)
+            # Reset to placeholder
+            self.templates_combo.setCurrentIndex(0)
+
+    def _save_template(self):
+        """Save current command as template"""
+        command = self.command_entry.text().strip()
+        if not command:
+            return
+
+        templates = self.config.get("command_templates", [])
+        if command not in templates:
+            templates.append(command)
+            self.config["command_templates"] = templates
+            self._save_config()
+            self._populate_templates_combo()
+            # Show feedback
+            original_text = self.run_button.text()
+            self.run_button.setText("✓ Saved!")
+            QTimer.singleShot(1500, lambda: self.run_button.setText(original_text))
+
+    def _populate_history_combo(self):
+        """Populate history combobox with recent feedback"""
+        self.history_combo.clear()
+        self.history_combo.addItem("-- Select from history --")
+
+        # Add recent history items (newest first)
+        for entry in reversed(self.history[-10:]):  # Show last 10
+            timestamp = entry.get("timestamp", "")
+            feedback = entry.get("feedback", "")
+            # Create display text (first 50 chars of feedback)
+            display_text = feedback[:50] + "..." if len(feedback) > 50 else feedback
+            if timestamp:
+                try:
+                    import datetime
+                    dt = datetime.datetime.fromisoformat(timestamp)
+                    time_str = dt.strftime("%m/%d %H:%M")
+                    display_text = f"[{time_str}] {display_text}"
+                except:
+                    pass
+            self.history_combo.addItem(display_text, entry)
+
+    def _on_history_selected(self, index: int):
+        """Handle history selection"""
+        if index > 0:  # Skip the placeholder item
+            entry = self.history_combo.itemData(index)
+            if entry:
+                self.feedback_text.setPlainText(entry.get("feedback", ""))
+            # Reset to placeholder
+            self.history_combo.setCurrentIndex(0)
 
     def _append_log(self, text: str):
         self.log_buffer.append(text)
-        self.log_text.append(text.rstrip())
+
+        # Apply syntax highlighting to each line
+        lines = text.rstrip().split('\n')
+        for line in lines:
+            highlighted = highlight_log_line(line)
+            self.log_text.append(highlighted)
+
         cursor = self.log_text.textCursor()
         cursor.movePosition(QTextCursor.End)
         self.log_text.setTextCursor(cursor)
@@ -547,21 +859,114 @@ class FeedbackUI(QMainWindow):
             self.run_button.setText("&Run")
 
     def _submit_feedback(self):
+        feedback_text = self.feedback_text.toPlainText().strip()
+
+        # Save to history if not empty
+        if feedback_text:
+            self._add_to_history(feedback_text)
+
         self.feedback_result = FeedbackResult(
             logs="".join(self.log_buffer),
-            user_feedback=self.feedback_text.toPlainText().strip(),
+            user_feedback=feedback_text,
         )
         self.close()
+
+    def _search_logs(self):
+        """Search for text in logs"""
+        search_text = self.search_entry.text()
+        if not search_text:
+            self.search_result_label.setText("")
+            return
+
+        # Move cursor to start for new search
+        cursor = self.log_text.textCursor()
+        cursor.movePosition(QTextCursor.Start)
+        self.log_text.setTextCursor(cursor)
+
+        # Find first occurrence
+        self._search_next()
+
+    def _search_next(self):
+        """Find next occurrence"""
+        search_text = self.search_entry.text()
+        if not search_text:
+            return
+
+        found = self.log_text.find(search_text)
+        if found:
+            self.search_result_label.setText("✓")
+        else:
+            # Wrap around to start
+            cursor = self.log_text.textCursor()
+            cursor.movePosition(QTextCursor.Start)
+            self.log_text.setTextCursor(cursor)
+            found = self.log_text.find(search_text)
+            if found:
+                self.search_result_label.setText("✓ (wrapped)")
+            else:
+                self.search_result_label.setText("Not found")
+
+    def _search_prev(self):
+        """Find previous occurrence"""
+        search_text = self.search_entry.text()
+        if not search_text:
+            return
+
+        found = self.log_text.find(search_text, QTextEdit.FindBackward)
+        if found:
+            self.search_result_label.setText("✓")
+        else:
+            # Wrap around to end
+            cursor = self.log_text.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            self.log_text.setTextCursor(cursor)
+            found = self.log_text.find(search_text, QTextEdit.FindBackward)
+            if found:
+                self.search_result_label.setText("✓ (wrapped)")
+            else:
+                self.search_result_label.setText("Not found")
+
+    def _copy_logs(self):
+        """Copy logs to clipboard"""
+        logs = "".join(self.log_buffer)
+        clipboard = QApplication.clipboard()
+        clipboard.setText(logs)
+        # Show temporary feedback
+        original_text = self.clear_button.text()
+        self.clear_button.setText("✓ Copied!")
+        QTimer.singleShot(1500, lambda: self.clear_button.setText(original_text))
+
+    def _export_logs(self):
+        """Export logs to file"""
+        import datetime
+        default_filename = f"feedback-logs-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Logs",
+            os.path.join(self.project_directory, default_filename),
+            "Text Files (*.txt);;All Files (*)"
+        )
+        if filename:
+            try:
+                with open(filename, "w") as f:
+                    f.write("".join(self.log_buffer))
+                # Show temporary feedback
+                original_text = self.clear_button.text()
+                self.clear_button.setText("✓ Exported!")
+                QTimer.singleShot(1500, lambda: self.clear_button.setText(original_text))
+            except Exception as e:
+                self._append_log(f"Failed to export logs: {e}\n")
 
     def clear_logs(self):
         self.log_buffer = []
         self.log_text.clear()
 
     def closeEvent(self, event):
-        # Save window geometry and state
+        # Save window geometry, state, and splitter sizes
         settings = QSettings("UserFeedback", "MainWindow")
         settings.setValue("geometry", self.saveGeometry())
         settings.setValue("windowState", self.saveState())
+        settings.setValue("splitter_sizes", self.splitter.sizes())
 
         if self.process:
             kill_tree(self.process)

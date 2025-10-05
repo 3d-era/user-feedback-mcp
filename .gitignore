@@ -13,3 +13,4 @@ venv*/
 # Logs
 *.log
 .user-feedback.json
+.user-feedback-history.json
