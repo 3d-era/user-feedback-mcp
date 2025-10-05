@@ -150,7 +150,7 @@ def markdown_to_html(markdown_text: str, is_dark_theme: bool = True) -> str:
 
     html_content = ''.join(html_lines)
 
-    return f'<div style="color: {text_color}; font-family: Arial, sans-serif; font-size: 11pt; line-height: 1.5;">{html_content}</div>'
+    return f'<div style="color: {text_color}; font-family: Arial, sans-serif; font-size: 11pt; line-height: 1.2;">{html_content}</div>'
 
 def set_dark_title_bar(widget: QWidget, dark_title_bar: bool) -> None:
     # Ensure we're on Windows
