@@ -9,7 +9,7 @@ from typing import Optional, TypedDict
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QLineEdit, QPushButton, QCheckBox, QTextEdit, QGroupBox
+    QLabel, QLineEdit, QPushButton, QCheckBox, QTextEdit, QGroupBox, QTextBrowser, QSplitter
 )
 from PySide6.QtCore import Qt, Signal, QObject, QTimer, QSettings
 from PySide6.QtGui import QTextCursor, QIcon, QKeyEvent, QFont, QFontDatabase, QPalette, QColor
@@ -21,6 +21,86 @@ class FeedbackResult(TypedDict):
 class FeedbackConfig(TypedDict):
     run_command: str
     execute_automatically: bool = False
+
+def markdown_to_html(markdown_text: str) -> str:
+    """Convert markdown to HTML with proper formatting support"""
+    import re
+
+    lines = markdown_text.split('\n')
+    html_lines = []
+    in_code_block = False
+    code_block_content = []
+    in_list = False
+
+    for line in lines:
+        # Code blocks
+        if line.strip().startswith('```'):
+            if in_code_block:
+                # End code block
+                code_content = '\n'.join(code_block_content)
+                html_lines.append(f'<pre style="background-color: #1e1e1e; padding: 8px; margin: 5px 0; border-radius: 3px; color: #d4d4d4; font-family: monospace; font-size: 10pt;"><code>{code_content}</code></pre>')
+                code_block_content = []
+                in_code_block = False
+            else:
+                # Start code block
+                in_code_block = True
+            continue
+
+        if in_code_block:
+            code_block_content.append(line)
+            continue
+
+        # Headers
+        if line.startswith('### '):
+            html_lines.append(f'<h3 style="color: #3498db; margin: 8px 0 4px 0; font-size: 13pt;">{line[4:]}</h3>')
+            continue
+        elif line.startswith('## '):
+            html_lines.append(f'<h2 style="color: #3498db; margin: 10px 0 5px 0; font-size: 14pt;">{line[3:]}</h2>')
+            continue
+        elif line.startswith('# '):
+            html_lines.append(f'<h1 style="color: #3498db; margin: 12px 0 6px 0; font-size: 16pt;">{line[2:]}</h1>')
+            continue
+
+        # Lists
+        if line.strip().startswith('- '):
+            if not in_list:
+                html_lines.append('<ul style="margin: 3px 0; padding-left: 20px;">')
+                in_list = True
+            content = line.strip()[2:]
+            # Process inline formatting
+            content = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', content)
+            content = re.sub(r'`(.+?)`', r'<code style="background-color: #1e1e1e; padding: 1px 4px; border-radius: 2px; color: #d4d4d4; font-size: 10pt;">\1</code>', content)
+            html_lines.append(f'<li style="margin: 2px 0; font-size: 11pt;">{content}</li>')
+            continue
+        else:
+            if in_list:
+                html_lines.append('</ul>')
+                in_list = False
+
+        # Empty lines
+        if not line.strip():
+            html_lines.append('<br>')
+            continue
+
+        # Regular text with inline formatting
+        processed_line = line
+        # Bold
+        processed_line = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', processed_line)
+        processed_line = re.sub(r'__(.+?)__', r'<b>\1</b>', processed_line)
+        # Italic
+        processed_line = re.sub(r'\*([^*]+?)\*', r'<i>\1</i>', processed_line)
+        # Inline code
+        processed_line = re.sub(r'`(.+?)`', r'<code style="background-color: #1e1e1e; padding: 1px 4px; border-radius: 2px; color: #d4d4d4; font-size: 10pt;">\1</code>', processed_line)
+
+        html_lines.append(f'<span style="font-size: 11pt;">{processed_line}</span>')
+
+    # Close any open list
+    if in_list:
+        html_lines.append('</ul>')
+
+    html_content = ''.join(html_lines)
+
+    return f'<div style="color: #ecf0f1; font-family: Arial, sans-serif; font-size: 11pt; line-height: 1.5;">{html_content}</div>'
 
 def set_dark_title_bar(widget: QWidget, dark_title_bar: bool) -> None:
     # Ensure we're on Windows
@@ -313,24 +393,13 @@ class FeedbackUI(QMainWindow):
 
         layout.addWidget(command_group)
 
-        # Feedback section with fixed size
-        feedback_group = QGroupBox("Feedback")
-        feedback_layout = QVBoxLayout(feedback_group)
-        feedback_group.setFixedHeight(150)
+        # Create a splitter for resizable sections
+        splitter = QSplitter(Qt.Vertical)
 
-        self.feedback_text = FeedbackTextEdit()
-        self.feedback_text.setMinimumHeight(60)
-        self.feedback_text.setPlaceholderText(self.prompt)
-        submit_button = QPushButton("Submit &Feedback (Ctrl+Enter)")
-        submit_button.clicked.connect(self._submit_feedback)
-
-        feedback_layout.addWidget(self.feedback_text)
-        feedback_layout.addWidget(submit_button)
-
-        # Console section (takes remaining space)
+        # Console section (resizable)
         console_group = QGroupBox("Console")
         console_layout = QVBoxLayout(console_group)
-        console_group.setMinimumHeight(200)
+        console_group.setMinimumHeight(80)
 
         # Log text area
         self.log_text = QTextEdit()
@@ -348,9 +417,53 @@ class FeedbackUI(QMainWindow):
         button_layout.addWidget(self.clear_button)
         console_layout.addLayout(button_layout)
 
-        # Add widgets in reverse order (feedback at bottom)
-        layout.addWidget(console_group, stretch=1)  # Takes all remaining space
-        layout.addWidget(feedback_group)  # Fixed size, no stretch
+        splitter.addWidget(console_group)
+
+        # Feedback Content section (MAIN FOCUS - displays MCP prompt/summary with Markdown)
+        feedback_content_group = QGroupBox("Feedback Content")
+        feedback_content_layout = QVBoxLayout(feedback_content_group)
+        feedback_content_group.setMinimumHeight(150)
+
+        self.prompt_display = QTextBrowser()
+        self.prompt_display.setReadOnly(True)
+        self.prompt_display.setOpenExternalLinks(True)
+        self.prompt_display.setHtml(markdown_to_html(self.prompt))
+        self.prompt_display.setStyleSheet("""
+            QTextBrowser {
+                background-color: #2c3e50;
+                color: #ecf0f1;
+                border: 1px solid #34495e;
+                border-radius: 5px;
+                padding: 10px;
+                font-family: Arial, sans-serif;
+                font-size: 12pt;
+                line-height: 1.5;
+            }
+        """)
+        feedback_content_layout.addWidget(self.prompt_display)
+
+        splitter.addWidget(feedback_content_group)
+
+        # User Feedback Input section (resizable)
+        user_feedback_group = QGroupBox("Your Feedback")
+        user_feedback_layout = QVBoxLayout(user_feedback_group)
+        user_feedback_group.setMinimumHeight(80)
+
+        self.feedback_text = FeedbackTextEdit()
+        self.feedback_text.setMinimumHeight(40)
+        self.feedback_text.setPlaceholderText("Enter your feedback here...")
+        submit_button = QPushButton("Submit &Feedback (Ctrl+Enter)")
+        submit_button.clicked.connect(self._submit_feedback)
+
+        user_feedback_layout.addWidget(self.feedback_text)
+        user_feedback_layout.addWidget(submit_button)
+
+        splitter.addWidget(user_feedback_group)
+
+        # Set initial sizes: Console=1, Feedback Content=4, User Feedback=1
+        splitter.setSizes([100, 400, 100])
+
+        layout.addWidget(splitter)
 
     def _update_config(self):
         self.config = {
