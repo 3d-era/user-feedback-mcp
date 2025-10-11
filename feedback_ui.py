@@ -23,6 +23,21 @@ class FeedbackConfig(TypedDict):
     execute_automatically: bool = False
     command_templates: list = []  # List of saved command templates
 
+def detect_log_level(line: str) -> str:
+    """Detect log level from line content"""
+    import re
+
+    if re.search(r'\b(error|ERROR|Error|failed|FAILED|Failed|exception|Exception|EXCEPTION)\b', line):
+        return "Error"
+    elif re.search(r'\b(warning|WARNING|Warning|warn|WARN|Warn)\b', line):
+        return "Warning"
+    elif re.search(r'\b(success|SUCCESS|Success|passed|PASSED|Passed|completed|COMPLETED|Completed|✓|✔)\b', line):
+        return "Success"
+    elif re.search(r'\b(info|INFO|Info|note|NOTE|Note)\b', line):
+        return "Info"
+    else:
+        return "Other"
+
 def highlight_log_line(line: str) -> str:
     """Apply syntax highlighting to a log line"""
     import re
@@ -151,7 +166,7 @@ def markdown_to_html(markdown_text: str, is_dark_theme: bool = True) -> str:
 
     html_content = ''.join(html_lines)
 
-    return f'<div style="color: {text_color}; font-family: Arial, sans-serif; font-size: 11pt; line-height: 1.2;">{html_content}</div>'
+    return f'<div style="color: {text_color}; font-family: Arial, sans-serif; font-size: 11pt; line-height: 1.4; white-space: pre-wrap;">{html_content}</div>'
 
 def set_dark_title_bar(widget: QWidget, dark_title_bar: bool) -> None:
     # Ensure we're on Windows
@@ -335,6 +350,36 @@ def get_user_environment() -> dict[str, str]:
     finally:
         CloseHandle(token)
 
+class DragDropLineEdit(QLineEdit):
+    """QLineEdit with drag & drop support for files"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dropEvent(self, event):
+        if event.mimeData().hasUrls():
+            urls = event.mimeData().urls()
+            if urls:
+                # Get file path from first URL
+                file_path = urls[0].toLocalFile()
+                if file_path:
+                    # Insert file path at cursor position
+                    cursor_pos = self.cursorPosition()
+                    current_text = self.text()
+                    new_text = current_text[:cursor_pos] + file_path + current_text[cursor_pos:]
+                    self.setText(new_text)
+                    # Move cursor after inserted path
+                    self.setCursorPosition(cursor_pos + len(file_path))
+            event.acceptProposedAction()
+        else:
+            super().dropEvent(event)
+
 class FeedbackTextEdit(QTextEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -369,6 +414,7 @@ class FeedbackUI(QMainWindow):
 
         self.process: Optional[subprocess.Popen] = None
         self.log_buffer = []
+        self.log_entries = []  # Store log entries with metadata: [(line, level, line_number), ...]
         self.feedback_result = None
         self.log_signals = LogSignals()
         self.log_signals.append_log.connect(self._append_log)
@@ -455,14 +501,109 @@ class FeedbackUI(QMainWindow):
                 path = path[0].upper() + path[1:]
         return path
 
+    def _create_menu_bar(self):
+        """Create menu bar with View options"""
+        menubar = self.menuBar()
+
+        # View menu
+        view_menu = menubar.addMenu("&View")
+
+        # Show Command action
+        self.show_command_action = view_menu.addAction("Show &Command")
+        self.show_command_action.setCheckable(True)
+        self.show_command_action.setChecked(self.settings.value("show_command", True, type=bool))
+        self.show_command_action.triggered.connect(self._toggle_command_visibility)
+
+        # Show Console action
+        self.show_console_action = view_menu.addAction("Show C&onsole")
+        self.show_console_action.setCheckable(True)
+        self.show_console_action.setChecked(self.settings.value("show_console", True, type=bool))
+        self.show_console_action.triggered.connect(self._toggle_console_visibility)
+
+        view_menu.addSeparator()
+
+        # Toggle Theme action
+        toggle_theme_action = view_menu.addAction("Toggle &Theme")
+        toggle_theme_action.triggered.connect(self._toggle_theme)
+
+    def _toggle_command_visibility(self, from_button=False):
+        """Toggle Command section visibility with collapse/expand"""
+        # If called from button, toggle current state
+        if from_button:
+            current_visible = self.command_group.isVisible()
+            is_visible = not current_visible
+            # Update action to match
+            self.show_command_action.setChecked(is_visible)
+        else:
+            # Called from menu action
+            is_visible = self.show_command_action.isChecked()
+
+        # Toggle visibility of content only (keep header visible)
+        self.command_group.setVisible(is_visible)
+
+        # Update button text
+        self.command_collapse_button.setText("▼" if is_visible else "▶")
+
+        # Save state
+        self.settings.setValue("show_command", is_visible)
+
+    def _toggle_console_visibility(self, from_button=False):
+        """Toggle Console section visibility with collapse/expand"""
+        # If called from button, toggle current state
+        if from_button:
+            current_visible = self.console_group.isVisible()
+            is_visible = not current_visible
+            # Update action to match
+            self.show_console_action.setChecked(is_visible)
+        else:
+            # Called from menu action
+            is_visible = self.show_console_action.isChecked()
+
+        # Toggle visibility of content only (keep header visible)
+        self.console_group.setVisible(is_visible)
+
+        # Force splitter to recalculate sizes
+        if not is_visible:
+            # When collapsing, set console container to minimum size
+            sizes = self.splitter.sizes()
+            console_index = self.splitter.indexOf(self.console_container)
+            if console_index >= 0:
+                sizes[console_index] = 30  # Just enough for header
+                self.splitter.setSizes(sizes)
+
+        # Update button text
+        self.console_collapse_button.setText("▼" if is_visible else "▶")
+
+        # Save state
+        self.settings.setValue("show_console", is_visible)
+
     def _create_ui(self):
+        # Create menu bar
+        self._create_menu_bar()
+
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         layout = QVBoxLayout(central_widget)
 
-        # Command section
-        command_group = QGroupBox("Command")
-        command_layout = QVBoxLayout(command_group)
+        # Command section with collapse button
+        self.command_container = QWidget()
+        command_container_layout = QVBoxLayout(self.command_container)
+        command_container_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Command header with collapse button
+        command_header = QHBoxLayout()
+        command_title = QLabel("<b>Command</b>")
+        self.command_collapse_button = QPushButton("▼")
+        self.command_collapse_button.setMaximumWidth(30)
+        self.command_collapse_button.setToolTip("Collapse/Expand Command section")
+        self.command_collapse_button.clicked.connect(lambda: self._toggle_command_visibility(from_button=True))
+        command_header.addWidget(command_title)
+        command_header.addStretch()
+        command_header.addWidget(self.command_collapse_button)
+        command_container_layout.addLayout(command_header)
+
+        self.command_group = QGroupBox()
+        command_layout = QVBoxLayout(self.command_group)
 
         # Working directory label
         formatted_path = self._format_windows_path(self.project_directory)
@@ -489,8 +630,9 @@ class FeedbackUI(QMainWindow):
 
         # Command input row
         command_input_layout = QHBoxLayout()
-        self.command_entry = QLineEdit()
+        self.command_entry = DragDropLineEdit()
         self.command_entry.setText(self.config["run_command"])
+        self.command_entry.setPlaceholderText("Enter command or drag & drop files here...")
         self.command_entry.returnPressed.connect(self._run_command)
         self.command_entry.textChanged.connect(self._update_config)
         self.run_button = QPushButton("&Run (Ctrl+R / F5)")
@@ -520,15 +662,32 @@ class FeedbackUI(QMainWindow):
         auto_layout.addWidget(save_button)
         command_layout.addLayout(auto_layout)
 
-        layout.addWidget(command_group)
+        command_container_layout.addWidget(self.command_group)
+        layout.addWidget(self.command_container)
 
         # Create a splitter for resizable sections
         self.splitter = QSplitter(Qt.Vertical)
 
-        # Console section (resizable)
-        console_group = QGroupBox("Console")
-        console_layout = QVBoxLayout(console_group)
-        console_group.setMinimumHeight(80)
+        # Console section with collapse button
+        self.console_container = QWidget()
+        console_container_layout = QVBoxLayout(self.console_container)
+        console_container_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Console header with collapse button
+        console_header = QHBoxLayout()
+        console_title = QLabel("<b>Console</b>")
+        self.console_collapse_button = QPushButton("▼")
+        self.console_collapse_button.setMaximumWidth(30)
+        self.console_collapse_button.setToolTip("Collapse/Expand Console section")
+        self.console_collapse_button.clicked.connect(lambda: self._toggle_console_visibility(from_button=True))
+        console_header.addWidget(console_title)
+        console_header.addStretch()
+        console_header.addWidget(self.console_collapse_button)
+        console_container_layout.addLayout(console_header)
+
+        self.console_group = QGroupBox()
+        console_layout = QVBoxLayout(self.console_group)
+        self.console_group.setMinimumHeight(80)
 
         # Search box
         search_layout = QHBoxLayout()
@@ -556,12 +715,35 @@ class FeedbackUI(QMainWindow):
         search_layout.addWidget(self.search_result_label)
         console_layout.addLayout(search_layout)
 
+        # Filter and options row
+        filter_layout = QHBoxLayout()
+
+        # Log level filter
+        filter_label = QLabel("Filter:")
+        self.log_level_filter = QComboBox()
+        self.log_level_filter.addItems(["All", "Error", "Warning", "Success", "Info"])
+        self.log_level_filter.setMaximumWidth(100)
+        self.log_level_filter.currentTextChanged.connect(self._apply_log_filter)
+
+        # Line numbers toggle
+        self.show_line_numbers_check = QCheckBox("Line #")
+        self.show_line_numbers_check.setChecked(self.settings.value("show_line_numbers", False, type=bool))
+        self.show_line_numbers_check.stateChanged.connect(self._toggle_line_numbers)
+
+        filter_layout.addWidget(filter_label)
+        filter_layout.addWidget(self.log_level_filter)
+        filter_layout.addWidget(self.show_line_numbers_check)
+        filter_layout.addStretch()
+        console_layout.addLayout(filter_layout)
+
         # Log text area with syntax highlighting
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setAcceptRichText(True)
         font = QFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
-        font.setPointSize(9)
+        # Restore saved font size or use default (9pt)
+        saved_font_size = self.settings.value("console_font_size", 9, type=int)
+        font.setPointSize(saved_font_size)
         self.log_text.setFont(font)
         console_layout.addWidget(self.log_text)
 
@@ -589,7 +771,8 @@ class FeedbackUI(QMainWindow):
 
         console_layout.addLayout(button_layout)
 
-        self.splitter.addWidget(console_group)
+        console_container_layout.addWidget(self.console_group)
+        self.splitter.addWidget(self.console_container)
 
         # Feedback Content section (MAIN FOCUS - displays MCP prompt/summary with Markdown)
         feedback_content_group = QGroupBox("Feedback Content")
@@ -599,6 +782,11 @@ class FeedbackUI(QMainWindow):
         self.prompt_display = QTextBrowser()
         self.prompt_display.setReadOnly(True)
         self.prompt_display.setOpenExternalLinks(True)
+        # Ensure content is scrollable and not clipped
+        self.prompt_display.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.prompt_display.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        # Set minimum height to ensure content is visible
+        self.prompt_display.setMinimumHeight(200)
         # Theme will be applied in _apply_theme()
         feedback_content_layout.addWidget(self.prompt_display)
 
@@ -609,16 +797,41 @@ class FeedbackUI(QMainWindow):
         user_feedback_layout = QVBoxLayout(user_feedback_group)
         user_feedback_group.setMinimumHeight(80)
 
+        # Templates and History row
+        templates_history_layout = QHBoxLayout()
+
+        # Feedback templates
+        templates_label = QLabel("Templates:")
+        self.feedback_templates_combo = QComboBox()
+        self.feedback_templates_combo.addItem("-- Insert template --")
+        self._populate_feedback_templates_combo()
+        self.feedback_templates_combo.currentIndexChanged.connect(self._on_feedback_template_selected)
+
+        save_feedback_template_button = QPushButton("💾")
+        save_feedback_template_button.setMaximumWidth(30)
+        save_feedback_template_button.setToolTip("Save current feedback as template")
+        save_feedback_template_button.clicked.connect(self._save_feedback_template)
+
+        delete_feedback_template_button = QPushButton("🗑️")
+        delete_feedback_template_button.setMaximumWidth(30)
+        delete_feedback_template_button.setToolTip("Delete selected template")
+        delete_feedback_template_button.clicked.connect(self._delete_feedback_template)
+
+        templates_history_layout.addWidget(templates_label)
+        templates_history_layout.addWidget(self.feedback_templates_combo, stretch=1)
+        templates_history_layout.addWidget(save_feedback_template_button)
+        templates_history_layout.addWidget(delete_feedback_template_button)
+
         # History dropdown
-        history_layout = QHBoxLayout()
         history_label = QLabel("Recent:")
         self.history_combo = QComboBox()
         self.history_combo.addItem("-- Select from history --")
         self._populate_history_combo()
         self.history_combo.currentIndexChanged.connect(self._on_history_selected)
-        history_layout.addWidget(history_label)
-        history_layout.addWidget(self.history_combo, stretch=1)
-        user_feedback_layout.addLayout(history_layout)
+        templates_history_layout.addWidget(history_label)
+        templates_history_layout.addWidget(self.history_combo, stretch=1)
+
+        user_feedback_layout.addLayout(templates_history_layout)
 
         self.feedback_text = FeedbackTextEdit()
         self.feedback_text.setMinimumHeight(40)
@@ -644,6 +857,22 @@ class FeedbackUI(QMainWindow):
         # Apply initial theme
         self._apply_theme()
 
+        # Apply initial visibility state
+        show_command = self.settings.value("show_command", True, type=bool)
+        show_console = self.settings.value("show_console", True, type=bool)
+        self.command_group.setVisible(show_command)
+        self.console_group.setVisible(show_console)
+        self.command_collapse_button.setText("▼" if show_command else "▶")
+        self.console_collapse_button.setText("▼" if show_console else "▶")
+
+        # If console is collapsed on init, adjust splitter size
+        if not show_console:
+            sizes = self.splitter.sizes()
+            console_index = self.splitter.indexOf(self.console_container)
+            if console_index >= 0:
+                sizes[console_index] = 30  # Just enough for header
+                self.splitter.setSizes(sizes)
+
         # Setup keyboard shortcuts
         self._setup_shortcuts()
 
@@ -665,6 +894,18 @@ class FeedbackUI(QMainWindow):
         theme_shortcut = QShortcut(QKeySequence("Ctrl+T"), self)
         theme_shortcut.activated.connect(self._toggle_theme)
 
+        # Ctrl+Plus: Increase font size
+        increase_font_shortcut = QShortcut(QKeySequence("Ctrl++"), self)
+        increase_font_shortcut.activated.connect(self._increase_font_size)
+
+        # Ctrl+Minus: Decrease font size
+        decrease_font_shortcut = QShortcut(QKeySequence("Ctrl+-"), self)
+        decrease_font_shortcut.activated.connect(self._decrease_font_size)
+
+        # Ctrl+0: Reset font size
+        reset_font_shortcut = QShortcut(QKeySequence("Ctrl+0"), self)
+        reset_font_shortcut.activated.connect(self._reset_font_size)
+
         # Ctrl+Enter: Submit feedback (already handled in FeedbackTextEdit)
         # F5: Run command (alternative)
         f5_shortcut = QShortcut(QKeySequence("F5"), self)
@@ -676,6 +917,31 @@ class FeedbackUI(QMainWindow):
         self.settings.setValue("dark_theme", self.is_dark_theme)
         self.theme_button.setText("🌙 Dark" if self.is_dark_theme else "☀️ Light")
         self._apply_theme()
+
+    def _increase_font_size(self):
+        """Increase font size for console"""
+        font = self.log_text.font()
+        current_size = font.pointSize()
+        if current_size < 20:  # Max size
+            font.setPointSize(current_size + 1)
+            self.log_text.setFont(font)
+            self.settings.setValue("console_font_size", current_size + 1)
+
+    def _decrease_font_size(self):
+        """Decrease font size for console"""
+        font = self.log_text.font()
+        current_size = font.pointSize()
+        if current_size > 6:  # Min size
+            font.setPointSize(current_size - 1)
+            self.log_text.setFont(font)
+            self.settings.setValue("console_font_size", current_size - 1)
+
+    def _reset_font_size(self):
+        """Reset font size to default (9pt)"""
+        font = self.log_text.font()
+        font.setPointSize(9)
+        self.log_text.setFont(font)
+        self.settings.setValue("console_font_size", 9)
 
     def _apply_theme(self):
         """Apply the current theme to the application"""
@@ -705,7 +971,10 @@ class FeedbackUI(QMainWindow):
                 }
             """)
         # Re-render markdown with appropriate colors
-        self.prompt_display.setHtml(markdown_to_html(self.prompt, self.is_dark_theme))
+        html_content = markdown_to_html(self.prompt, self.is_dark_theme)
+        # Debug: Print first 500 chars of HTML to help diagnose rendering issues
+        print(f"DEBUG: HTML content (first 500 chars):\n{html_content[:500]}\n")
+        self.prompt_display.setHtml(html_content)
 
     def _update_config(self):
         self.config = {
@@ -778,18 +1047,138 @@ class FeedbackUI(QMainWindow):
             # Reset to placeholder
             self.history_combo.setCurrentIndex(0)
 
+    def _populate_feedback_templates_combo(self):
+        """Populate feedback templates combobox"""
+        self.feedback_templates_combo.clear()
+        self.feedback_templates_combo.addItem("-- Insert template --")
+
+        templates = self.config.get("feedback_templates", [])
+        for template in templates:
+            # Show first 50 chars in dropdown
+            display_text = template[:50] + "..." if len(template) > 50 else template
+            self.feedback_templates_combo.addItem(display_text, template)
+
+    def _on_feedback_template_selected(self, index: int):
+        """Handle feedback template selection - INSERT mode"""
+        if index > 0:  # Skip placeholder
+            template = self.feedback_templates_combo.itemData(index)
+            if template:
+                # Get current cursor position
+                cursor = self.feedback_text.textCursor()
+                # Insert template at cursor position
+                cursor.insertText(template)
+            # Reset to placeholder
+            self.feedback_templates_combo.setCurrentIndex(0)
+
+    def _save_feedback_template(self):
+        """Save current feedback as template"""
+        from PySide6.QtWidgets import QInputDialog
+
+        feedback = self.feedback_text.toPlainText().strip()
+        if not feedback:
+            return
+
+        # Ask for template name/description (optional)
+        text, ok = QInputDialog.getText(
+            self,
+            "Save Feedback Template",
+            "Template will be saved as:\n" + (feedback[:100] + "..." if len(feedback) > 100 else feedback) + "\n\nPress OK to save:",
+        )
+
+        if ok:
+            templates = self.config.get("feedback_templates", [])
+            if feedback not in templates:
+                templates.append(feedback)
+                self.config["feedback_templates"] = templates
+                self._save_config()
+                self._populate_feedback_templates_combo()
+                # Show feedback - use submit button for visual feedback
+                original_text = self.feedback_text.placeholderText()
+                self.feedback_text.setPlaceholderText("✓ Template saved!")
+                QTimer.singleShot(1500, lambda: self.feedback_text.setPlaceholderText(original_text))
+
+    def _delete_feedback_template(self):
+        """Delete selected feedback template"""
+        from PySide6.QtWidgets import QMessageBox
+
+        index = self.feedback_templates_combo.currentIndex()
+        if index <= 0:  # Skip placeholder
+            return
+
+        template = self.feedback_templates_combo.itemData(index)
+        if not template:
+            return
+
+        # Confirm deletion
+        reply = QMessageBox.question(
+            self,
+            "Delete Template",
+            f"Delete this template?\n\n{template[:100] + '...' if len(template) > 100 else template}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply == QMessageBox.Yes:
+            templates = self.config.get("feedback_templates", [])
+            if template in templates:
+                templates.remove(template)
+                self.config["feedback_templates"] = templates
+                self._save_config()
+                self._populate_feedback_templates_combo()
+
     def _append_log(self, text: str):
         self.log_buffer.append(text)
 
-        # Apply syntax highlighting to each line
+        # Apply syntax highlighting to each line and store metadata
         lines = text.rstrip().split('\n')
         for line in lines:
+            level = detect_log_level(line)
+            line_number = len(self.log_entries) + 1
+            self.log_entries.append((line, level, line_number))
+
+            # Apply filter
+            current_filter = self.log_level_filter.currentText()
+            if current_filter != "All" and level != current_filter and level != "Other":
+                continue  # Skip lines that don't match filter
+
+            # Add line number if enabled
+            show_line_numbers = self.show_line_numbers_check.isChecked()
+            if show_line_numbers:
+                line_prefix = f'<span style="color: #95a5a6;">{line_number:4d} | </span>'
+            else:
+                line_prefix = ''
+
             highlighted = highlight_log_line(line)
-            self.log_text.append(highlighted)
+            self.log_text.append(line_prefix + highlighted)
 
         cursor = self.log_text.textCursor()
         cursor.movePosition(QTextCursor.End)
         self.log_text.setTextCursor(cursor)
+
+    def _apply_log_filter(self):
+        """Re-render logs with current filter"""
+        self.log_text.clear()
+        current_filter = self.log_level_filter.currentText()
+        show_line_numbers = self.show_line_numbers_check.isChecked()
+
+        for line, level, line_number in self.log_entries:
+            # Apply filter
+            if current_filter != "All" and level != current_filter and level != "Other":
+                continue
+
+            # Add line number if enabled
+            if show_line_numbers:
+                line_prefix = f'<span style="color: #95a5a6;">{line_number:4d} | </span>'
+            else:
+                line_prefix = ''
+
+            highlighted = highlight_log_line(line)
+            self.log_text.append(line_prefix + highlighted)
+
+    def _toggle_line_numbers(self):
+        """Toggle line numbers display"""
+        self.settings.setValue("show_line_numbers", self.show_line_numbers_check.isChecked())
+        self._apply_log_filter()  # Re-render with/without line numbers
 
     def _check_process_status(self):
         if self.process and self.process.poll() is not None:
@@ -909,11 +1298,13 @@ class FeedbackUI(QMainWindow):
 
     def _search_prev(self):
         """Find previous occurrence"""
+        from PySide6.QtGui import QTextDocument
+
         search_text = self.search_entry.text()
         if not search_text:
             return
 
-        found = self.log_text.find(search_text, QTextEdit.FindBackward)
+        found = self.log_text.find(search_text, QTextDocument.FindBackward)
         if found:
             self.search_result_label.setText("✓")
         else:
@@ -921,7 +1312,7 @@ class FeedbackUI(QMainWindow):
             cursor = self.log_text.textCursor()
             cursor.movePosition(QTextCursor.End)
             self.log_text.setTextCursor(cursor)
-            found = self.log_text.find(search_text, QTextEdit.FindBackward)
+            found = self.log_text.find(search_text, QTextDocument.FindBackward)
             if found:
                 self.search_result_label.setText("✓ (wrapped)")
             else:

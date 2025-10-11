@@ -64,7 +64,7 @@ def user_feedback(
     summary: Annotated[str, Field(description="Short, one-line summary of the changes")],
 ) -> Dict[str, str]:
     """Request user feedback for a given project directory and summary"""
-    return launch_feedback_ui(first_line(project_directory), first_line(summary))
+    return launch_feedback_ui(first_line(project_directory), summary)
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")
