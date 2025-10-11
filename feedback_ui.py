@@ -127,9 +127,9 @@ def markdown_to_html(markdown_text: str, is_dark_theme: bool = True) -> str:
                 html_lines.append('</ul>')
                 in_list = False
 
-        # Empty lines
+        # Empty lines - use double <br> to create proper paragraph spacing
         if not line.strip():
-            html_lines.append('<br>')
+            html_lines.append('<br><br>')
             continue
 
         # Regular text with inline formatting
@@ -142,7 +142,8 @@ def markdown_to_html(markdown_text: str, is_dark_theme: bool = True) -> str:
         # Inline code
         processed_line = re.sub(r'`(.+?)`', f'<code style="background-color: {code_bg}; padding: 1px 4px; border-radius: 2px; color: {code_color}; font-size: 10pt;">\\1</code>', processed_line)
 
-        html_lines.append(f'<span style="font-size: 11pt;">{processed_line}</span>')
+        # Add line break after each regular text line to preserve single \n
+        html_lines.append(f'<span style="font-size: 11pt;">{processed_line}</span><br>')
 
     # Close any open list
     if in_list:
